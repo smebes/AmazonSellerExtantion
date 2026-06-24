@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Amazon Seller Scraper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h2>Amazon Seller Scraper</h2>
+
+    <label class="field-label" for="asinInput">ASIN listesi (her satıra bir tane)</label>
+    <textarea id="asinInput" class="asin-textarea" rows="7"
+      placeholder="B002901DLY&#10;B004JEEUN6&#10;B005X4I8KW&#10;..."></textarea>
+
+    <div class="input-row">
+      <span id="asinCount" class="asin-count">0 ASIN kalan</span>
+      <div class="btn-group">
+        <button id="startBtn">Başlat / Devam</button>
+        <button id="clearQueueBtn" type="button" class="btn-secondary">Listeyi sıfırla</button>
+      </div>
+    </div>
+
+    <div id="queue-progress" class="queue-progress"></div>
+
+    <div class="settings-block">
+      <label class="option-row">
+        <input type="checkbox" id="skipCached" checked>
+        Daha önce taranan satıcıları atla
+      </label>
+      <label class="option-row">
+        <input type="checkbox" id="autoUpload" checked>
+        Tarama bitince otomatik DB'ye yükle
+      </label>
+      <fieldset class="mode-fieldset">
+        <legend>Envanter taraması</legend>
+        <label class="option-row">
+          <input type="radio" name="inventoryMode" id="inventoryCategory" value="category" checked>
+          Kategori bazlı (Mode B — önerilen)
+        </label>
+        <label class="option-row">
+          <input type="radio" name="inventoryMode" id="inventoryFlat" value="flat">
+          Flat mağaza (~306 ürün, eski)
+        </label>
+      </fieldset>
+      <input type="text" id="apiUrl" class="api-url-input"
+        placeholder="http://51.102.128.78:3009/sellers" value="">
+      <label class="field-label" for="parallelTabs">Paralel kategori sekmesi (1–8)</label>
+      <input type="number" id="parallelTabs" class="api-url-input parallel-tabs-input"
+        min="1" max="8" value="5">
+      <span class="hint">5 sekme ≈ 5× hız — captcha görürseniz 2–3'e düşürün; Chrome açık kalsın</span>
+      <label class="option-row">
+        <input type="checkbox" id="branchPruning" checked>
+        Üst kategori boşsa alt leaf'leri atla (hızlı budama)
+      </label>
+    </div>
+
+    <div class="single-seller-block">
+      <label class="field-label" for="sellerIdInput">Tek satıcı (doğrudan kategori taraması)</label>
+      <div class="input-row seller-id-row">
+        <input type="text" id="sellerIdInput" class="seller-id-input"
+          placeholder="AV8BWFAA8SLJI veya Amazon mağaza URL (me=...)">
+        <button type="button" id="scanOneSellerBtn">Tara</button>
+      </div>
+      <label class="option-row">
+        <input type="checkbox" id="forceFullRescan">
+        Baştan tara (job sıfırla — resume kapalı)
+      </label>
+      <span class="hint">Tara = kaldığı yerden devam (done/empty atlanır). Tamamen bitince bir daha taramaz. Sıfırlamak için «Baştan tara».</span>
+    </div>
+
+    <div class="seller-scan-block">
+      <button id="scanSellersBtn" type="button" class="btn-secondary">Mevcut satıcıları tara (DB)</button>
+      <span class="hint">Kategori job resume — takılı kalırsa kaldığı yerden devam eder</span>
+    </div>
+
+    <div id="status" class="status">Bekliyor...</div>
+    <div id="api-status" class="status"></div>
+
+    <div id="sellers-section" style="display:none">
+      <h3>Bulunan Satıcılar</h3>
+      <table id="sellers-table">
+        <thead>
+          <tr><th>Satıcı Adı</th><th>ID</th><th>Kaynak Edition</th><th>Ürün</th><th>Durum</th><th>DB</th></tr>
+        </thead>
+        <tbody id="sellers-body"></tbody>
+      </table>
+    </div>
+
+    <div id="products-section" style="display:none">
+      <h3>Satıcı Ürünleri</h3>
+      <table id="products-table">
+        <thead>
+          <tr><th>ASIN</th><th>Başlık</th><th>Edition</th><th>Fiyat</th></tr>
+        </thead>
+        <tbody id="products-body"></tbody>
+      </table>
+
+      <div class="actions">
+        <button id="csvBtn">CSV İndir</button>
+        <button id="apiBtn">DB'ye Tekrar Gönder</button>
+      </div>
+    </div>
+  </div>
+  <script src="../config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+body { font-family: Arial, sans-serif; min-width: 500px; padding: 10px; }
+h2 { color: #ff6600; margin-bottom: 10px; }
+.input-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; justify-content: space-between; }
+.field-label { font-size: 12px; color: #444; display: block; margin-bottom: 4px; }
+.asin-textarea { width: 100%; padding: 8px; font-size: 13px; font-family: monospace; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; resize: vertical; margin-bottom: 8px; }
+.asin-count { font-size: 12px; color: #666; flex: 1; }
+.btn-group { display: flex; gap: 6px; }
+button.btn-secondary { background: #888; }
+button.btn-secondary:hover { background: #666; }
+.queue-progress { font-size: 11px; color: #555; margin-bottom: 8px; line-height: 1.4; }
+.queue-progress .done { color: #2a7a2a; }
+.settings-block { margin-bottom: 10px; }
+.option-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; margin-bottom: 6px; cursor: pointer; }
+.api-url-input { width: 100%; padding: 6px; font-size: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; margin-top: 4px; }
+.parallel-tabs-input { width: 4.5rem; margin-bottom: 4px; }
+#asinInput { flex: 1; padding: 6px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+.input-row button { flex-shrink: 0; }
+button { background: #ff6600; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+button:hover { background: #e55a00; }
+button:disabled { background: #aaa; cursor: not-allowed; }
+.status { color: #666; font-style: italic; margin-bottom: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+th { background: #f0f0f0; padding: 4px 8px; text-align: left; border-bottom: 2px solid #ccc; }
+td { padding: 4px 8px; border-bottom: 1px solid #eee; }
+tr:hover { background: #fff8f0; cursor: pointer; }
+.actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+#apiUrl { flex: 1; padding: 6px; font-size: 12px; }
+.mode-fieldset { border: 1px solid #ddd; border-radius: 4px; padding: 6px 10px 8px; margin: 8px 0; }
+.mode-fieldset legend { font-size: 11px; color: #555; padding: 0 4px; }
+.seller-scan-block { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.single-seller-block { margin-bottom: 10px; padding: 8px 10px; background: #fff8f0; border: 1px solid #ffd6b3; border-radius: 4px; }
+.single-seller-block .hint { font-size: 11px; color: #777; }
+.seller-id-input { flex: 1; padding: 6px 8px; font-size: 13px; font-family: monospace; border: 1px solid #ccc; border-radius: 4px; min-width: 0; }
+.seller-id-row { margin-bottom: 6px; }
+.seller-scan-block .hint { font-size: 11px; color: #777; }
