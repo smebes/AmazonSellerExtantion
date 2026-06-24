@@ -86,7 +86,9 @@ function getFormSettings() {
     apiUrl: document.getElementById('apiUrl').value.trim(),
     sellerId: document.getElementById('sellerIdInput')?.value?.trim() || '',
     parallelTabs,
-    branchPruning: document.getElementById('branchPruning').checked
+    branchPruning: document.getElementById('branchPruning').checked,
+    fleetMachineId: document.getElementById('fleetMachineId')?.value?.trim() || '',
+    fleetMachineLabel: document.getElementById('fleetMachineLabel')?.value?.trim() || ''
   };
 }
 
@@ -111,6 +113,8 @@ function loadSettings() {
     if (s.sellerId) document.getElementById('sellerIdInput').value = s.sellerId;
     if (s.parallelTabs != null) document.getElementById('parallelTabs').value = s.parallelTabs;
     if (s.branchPruning === false) document.getElementById('branchPruning').checked = false;
+    if (s.fleetMachineId) document.getElementById('fleetMachineId').value = s.fleetMachineId;
+    if (s.fleetMachineLabel) document.getElementById('fleetMachineLabel').value = s.fleetMachineLabel;
     const mode = s.inventoryMode || 'category';
     const radio = document.querySelector(`input[name="inventoryMode"][value="${mode}"]`);
     if (radio) radio.checked = true;
@@ -132,6 +136,35 @@ document.querySelectorAll('input[name="inventoryMode"]').forEach(el => {
 });
 
 document.getElementById('sellerIdInput')?.addEventListener('blur', persistSettings);
+document.getElementById('fleetMachineId')?.addEventListener('blur', persistSettings);
+document.getElementById('fleetMachineLabel')?.addEventListener('blur', persistSettings);
+
+document.getElementById('startFleetBtn')?.addEventListener('click', () => {
+  const settings = getFormSettings();
+  if (!settings.fleetMachineId) {
+    alert('Makine ID girin (örn. vm-01)');
+    return;
+  }
+  persistSettings();
+  if (settings.autoUpload && !settings.apiUrl) {
+    alert('Otomatik DB yükleme için API URL girin');
+    return;
+  }
+  chrome.runtime.sendMessage({
+    type: 'START_FLEET',
+    fleetMachineId: settings.fleetMachineId,
+    fleetMachineLabel: settings.fleetMachineLabel,
+    apiUrl: settings.apiUrl,
+    parallelTabs: settings.parallelTabs,
+    autoUpload: settings.autoUpload
+  });
+  document.getElementById('status').textContent = `Fleet ${settings.fleetMachineId} başlatılıyor...`;
+});
+
+document.getElementById('stopFleetBtn')?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'STOP_FLEET' });
+  document.getElementById('status').textContent = 'Fleet durduruluyor...';
+});
 
 document.getElementById('scanOneSellerBtn').addEventListener('click', () => {
   const settings = getFormSettings();

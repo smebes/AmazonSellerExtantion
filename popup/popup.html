@@ -55,6 +55,19 @@
       </label>
     </div>
 
+    <div class="fleet-block settings-block">
+      <h3 class="fleet-title">Fleet modu (sanal makine)</h3>
+      <label class="field-label" for="fleetMachineId">Makine ID</label>
+      <input type="text" id="fleetMachineId" class="api-url-input" placeholder="vm-01 … vm-20">
+      <label class="field-label" for="fleetMachineLabel">Etiket (isteğe bağlı)</label>
+      <input type="text" id="fleetMachineLabel" class="api-url-input" placeholder="Laptop-1">
+      <div class="input-row">
+        <button type="button" id="startFleetBtn" class="btn-secondary">Fleet başlat</button>
+        <button type="button" id="stopFleetBtn" class="btn-secondary">Durdur</button>
+      </div>
+      <span class="hint">sellerList.md sırasına göre kuyruktan satıcı alır. Bitince otomatik sonrakine geçer. 15 dk takılırsa sekmeler yenilenir.</span>
+    </div>
+
     <div class="single-seller-block">
       <label class="field-label" for="sellerIdInput">Tek satıcı (doğrudan kategori taraması)</label>
       <div class="input-row seller-id-row">

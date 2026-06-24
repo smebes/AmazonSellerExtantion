@@ -7,6 +7,9 @@ const QUEUE_KEY = 'asinQueuePersist';
 const SELLER_SCAN_KEY = 'sellerScanPersist';
 const SCAN_SESSION_KEY = 'activeScanSession';
 const KEEPALIVE_ALARM = 'scanKeepalive';
+const FLEET_HEARTBEAT_ALARM = 'fleetHeartbeat';
+const FLEET_WATCHDOG_ALARM = 'fleetWatchdog';
+const EXTENSION_VERSION = '1.2.9';
 const DEFAULT_API_URL = SCRAPER_API.sellersUrl;
 const DEFAULT_PARALLEL_TABS = 5;
 const BRANCH_COLLAPSE_MAX = 300;
@@ -50,8 +53,17 @@ let state = {
   apiUrl: DEFAULT_API_URL,
   apiMessage: '',
   categoryProgress: null,
-  targetSellerId: null
+  targetSellerId: null,
+  fleetMode: false,
+  fleetMachineId: '',
+  fleetMachineLabel: '',
+  fleetCurrentSeller: null,
+  fleetQueueIndex: null
 };
+
+let lastFleetProgressAt = 0;
+let activeCategoryTabIds = [];
+let fleetLoopRunning = false;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'START_SCRAPE') {
@@ -123,6 +135,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     saveSettings(msg.settings);
     sendResponse({ ok: true });
   }
+  if (msg.type === 'START_FLEET') {
+    startFleetOperations(msg).catch(err => handleScrapeError(err, 'Fleet'));
+    sendResponse({ ok: true });
+  }
+  if (msg.type === 'STOP_FLEET') {
+    stopFleetOperations().then(() => sendResponse({ ok: true }));
+    return true;
+  }
   return true;
 });
 
@@ -135,7 +155,10 @@ async function getSettings() {
     inventoryMode: data[SETTINGS_KEY]?.inventoryMode || 'category',
     resumeCategoryScan: data[SETTINGS_KEY]?.resumeCategoryScan !== false,
     parallelTabs: clampParallelTabs(data[SETTINGS_KEY]?.parallelTabs),
-    branchPruning: data[SETTINGS_KEY]?.branchPruning !== false
+    branchPruning: data[SETTINGS_KEY]?.branchPruning !== false,
+    fleetMode: data[SETTINGS_KEY]?.fleetMode === true,
+    fleetMachineId: String(data[SETTINGS_KEY]?.fleetMachineId || '').trim(),
+    fleetMachineLabel: String(data[SETTINGS_KEY]?.fleetMachineLabel || '').trim()
   };
 }
 
@@ -456,18 +479,29 @@ function leafShortName(rhPath) {
   return rhPath?.split(',').pop() || rhPath || '';
 }
 
-async function fetchJson(url, options) {
+async function fetchJson(url, options = {}, timeoutMs = 45000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(url, options);
+    res = await fetch(url, { ...options, signal: ctrl.signal });
   } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`API zaman aşımı (${Math.round(timeoutMs / 1000)} sn): ${url}`);
+    }
     throw new Error(`API bağlantı hatası: ${err.message} (${url})`);
+  } finally {
+    clearTimeout(timer);
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error('HTTP ' + res.status + (body ? ': ' + body.slice(0, 120) : ''));
   }
   return res.json();
+}
+
+async function fetchSellerInfo(apiBase, sellerId) {
+  return fetchJson(`${apiBase}/sellers/${encodeURIComponent(sellerId)}`, {}, 20000);
 }
 
 function handleScrapeError(err, label) {
@@ -664,12 +698,22 @@ async function initSellerCategoryJobs(apiBase, sellerId, sellerName) {
 }
 
 async function getAllCategoryJobs(apiBase, sellerId) {
-  return fetchJson(`${apiBase}/sellers/${encodeURIComponent(sellerId)}/category-jobs`);
+  return fetchJson(`${apiBase}/sellers/${encodeURIComponent(sellerId)}/category-jobs`, {}, 60000);
+}
+
+async function getCategoryJobSummary(apiBase, sellerId) {
+  return fetchJson(
+    `${apiBase}/sellers/${encodeURIComponent(sellerId)}/category-jobs/summary`,
+    {},
+    15000
+  );
 }
 
 async function getPendingCategoryJobs(apiBase, sellerId) {
   const rows = await fetchJson(
-    `${apiBase}/sellers/${encodeURIComponent(sellerId)}/category-jobs?pending=true`
+    `${apiBase}/sellers/${encodeURIComponent(sellerId)}/category-jobs?pending=true&minimal=true`,
+    {},
+    60000
   );
   return rows;
 }
@@ -1053,7 +1097,18 @@ async function createCategoryTabPool(count) {
     )
   );
   await delay(600);
-  return tabs.map(t => t.id);
+  const ids = tabs.map(t => t.id);
+  activeCategoryTabIds = ids;
+  return ids;
+}
+
+async function closeAllFleetCategoryTabs() {
+  for (const tabId of [...activeCategoryTabIds]) {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch (_) {}
+  }
+  activeCategoryTabIds = [];
 }
 
 async function closeCategoryTabPool(tabIds) {
@@ -1062,6 +1117,7 @@ async function closeCategoryTabPool(tabIds) {
       await chrome.tabs.remove(tabId);
     } catch (_) {}
   }
+  activeCategoryTabIds = activeCategoryTabIds.filter(id => !tabIds.includes(id));
 }
 
 function updateParallelCategoryProgress(sellerId, stats) {
@@ -1083,13 +1139,14 @@ function updateParallelCategoryProgress(sellerId, stats) {
   const activeNames = active.map(a => `${a.name} [tab]`).slice(0, stats.parallel);
   state.apiMessage = `${sellerId}: ${stats.done}/${stats.total} leaf (${pct}%) — ${stats.parallel} kol paralel` +
     (activeNames.length ? `\n↳ ${activeNames.join(' · ')}` : '');
+  noteFleetProgress(stats.done, stats.total);
   updatePopup(true);
 }
 
 async function processOneCategoryLeaf(sellerId, leaf, tabId, jobMap, options) {
   const { autoUpload, apiUrl, sourceAsin } = options;
   const rhPath = leaf.rh_path;
-  const job = jobMap.get(rhPath);
+  const job = jobMap?.get(rhPath);
   const startPage = (job?.last_page && job?.status === 'running') ? job.last_page + 1 : 1;
 
   let result;
@@ -1246,9 +1303,7 @@ async function scrapeSellerByCategories(sellerId, tabId, options) {
     } catch (_) {}
   } else if (options.skipCached && options.resumeCategoryScan !== false) {
     try {
-      const sellerInfo = await fetchJson(`${apiBase}/sellers`).then(rows =>
-        rows.find(s => s.id === sellerId)
-      );
+      const sellerInfo = await fetchSellerInfo(apiBase, sellerId);
       if (sellerInfo?.category_scan_status === 'done') {
         if (state.sellers[sellerId]) {
           state.sellers[sellerId].fromCache = true;
@@ -1258,26 +1313,58 @@ async function scrapeSellerByCategories(sellerId, tabId, options) {
         updatePopup(true);
         return 'skipped';
       }
-    } catch (_) {}
+    } catch (err) {
+      state.apiMessage = `${sellerId}: satıcı bilgisi alınamadı — ${err.message}`;
+      updatePopup(true);
+    }
   }
 
   try {
-    await initSellerCategoryJobs(apiBase, sellerId, sellerName);
+    let initOk = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await initSellerCategoryJobs(apiBase, sellerId, sellerName);
+        initOk = true;
+        break;
+      } catch (err) {
+        if (attempt >= 2) throw err;
+        state.apiMessage = `${sellerId}: DB init bekliyor (lock?) — tekrar ${attempt + 2}/3...`;
+        updatePopup(true);
+        await delay(1500 * (attempt + 1));
+      }
+    }
+    if (!initOk) throw new Error('init failed');
   } catch (err) {
-    console.warn('Job init (devam ediliyor):', err.message);
+    state.apiMessage = `${sellerId}: DB init hatası — ${err.message}`;
+    updatePopup(true);
+    return 'error';
+  }
+
+  let todo;
+  let pendingRows = [];
+  try {
+    pendingRows = await getPendingCategoryJobs(apiBase, sellerId);
+    const pendingSet = new Set(pendingRows.map(j => j.rh_path));
+    if (pendingSet.size) {
+      todo = leaves.filter(leaf => pendingSet.has(leaf.rh_path));
+    } else {
+      const summary = await getCategoryJobSummary(apiBase, sellerId);
+      if (summary.done > 0 && summary.pending === 0) {
+        if (state.sellers[sellerId]) state.sellers[sellerId].categoryScanDone = true;
+        state.apiMessage = `${sellerId}: tüm leaf kategoriler tamam ✓`;
+        updatePopup(true);
+        return 'skipped';
+      }
+      todo = leaves;
+    }
+  } catch (err) {
+    state.apiMessage = `${sellerId}: job listesi alınamadı — ${err.message}`;
+    updatePopup(true);
+    return 'error';
   }
 
   const jobMap = new Map();
-  try {
-    const allJobs = await getAllCategoryJobs(apiBase, sellerId);
-    for (const j of allJobs) jobMap.set(j.rh_path, j);
-  } catch (_) {}
-
-  const todo = leaves.filter(leaf => {
-    if (forceFullRescan) return true;
-    const j = jobMap.get(leaf.rh_path);
-    return !j || !['done', 'empty'].includes(j.status);
-  });
+  for (const j of pendingRows) jobMap.set(j.rh_path, j);
 
   if (!todo.length) {
     if (state.sellers[sellerId]) state.sellers[sellerId].categoryScanDone = true;
@@ -1452,7 +1539,7 @@ async function startSellerRescan(options = {}) {
     state.sellers[sellerId] = state.sellers[sellerId] || { id: sellerId, name: sellerId };
 
     try {
-      const info = await fetchJson(`${apiBase}/sellers`).then(rows => rows.find(s => s.id === sellerId));
+      const info = await fetchSellerInfo(apiBase, sellerId);
       if (info?.name) state.sellers[sellerId].name = info.name;
     } catch (_) {}
 
@@ -1664,7 +1751,247 @@ function downloadCSV(sellerId) {
   });
 }
 
+function noteFleetProgress(jobsDone, jobsTotal) {
+  lastFleetProgressAt = Date.now();
+  if (!state.fleetMode) return;
+  state.fleetJobsDone = jobsDone;
+  state.fleetJobsTotal = jobsTotal;
+  fleetHeartbeat('scanning', { progress: true }).catch(() => {});
+}
+
+async function fleetPost(path, body) {
+  const saved = await getSettings();
+  const base = apiBaseFromUrl(saved.apiUrl);
+  return fetchJson(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }, 30000);
+}
+
+async function fleetLog(level, event, message, meta) {
+  if (!state.fleetMachineId) return;
+  try {
+    await fleetPost('/fleet/log', {
+      machineId: state.fleetMachineId,
+      sellerId: state.fleetCurrentSeller,
+      level,
+      event,
+      message,
+      meta
+    });
+  } catch (err) {
+    console.warn('fleetLog:', err.message);
+  }
+}
+
+async function fleetHeartbeat(status, opts = {}) {
+  if (!state.fleetMachineId) return;
+  const saved = await getSettings();
+  const cp = state.categoryProgress;
+  try {
+    await fleetPost('/fleet/heartbeat', {
+      machineId: state.fleetMachineId,
+      label: state.fleetMachineLabel || state.fleetMachineId,
+      status: status || (isRunning ? 'scanning' : 'idle'),
+      sellerId: state.fleetCurrentSeller || state.targetSellerId,
+      queueIndex: state.fleetQueueIndex,
+      jobsDone: cp?.done ?? state.fleetJobsDone ?? 0,
+      jobsTotal: cp?.total ?? state.fleetJobsTotal ?? 0,
+      parallelTabs: saved.parallelTabs,
+      extensionVersion: EXTENSION_VERSION,
+      popupMessage: state.apiMessage?.slice(0, 500),
+      progressAt: opts.progress ? new Date(lastFleetProgressAt || Date.now()).toISOString() : undefined
+    });
+  } catch (err) {
+    console.warn('fleetHeartbeat:', err.message);
+  }
+}
+
+function scheduleFleetAlarms() {
+  const hbMin = SCRAPER_API?.fleet?.heartbeatMin || 2;
+  const wdMin = SCRAPER_API?.fleet?.watchdogMin || 15;
+  chrome.alarms.create(FLEET_HEARTBEAT_ALARM, { periodInMinutes: hbMin });
+  chrome.alarms.create(FLEET_WATCHDOG_ALARM, { periodInMinutes: wdMin });
+}
+
+function stopFleetAlarms() {
+  chrome.alarms.clear(FLEET_HEARTBEAT_ALARM);
+  chrome.alarms.clear(FLEET_WATCHDOG_ALARM);
+}
+
+async function stopFleetOperations() {
+  state.fleetMode = false;
+  fleetLoopRunning = false;
+  stopFleetAlarms();
+  await finishScanRun().catch(() => {});
+  await closeAllFleetCategoryTabs();
+  await fleetLog('info', 'fleet_stop', 'Fleet durduruldu');
+  await fleetHeartbeat('offline');
+  state.apiMessage = 'Fleet modu durduruldu';
+  updatePopup(true);
+}
+
+async function fleetClaimSeller() {
+  const data = await fleetPost('/fleet/claim', { machineId: state.fleetMachineId });
+  return data.claim || null;
+}
+
+async function fleetCompleteSeller(sellerId, success) {
+  await fleetPost('/fleet/complete', {
+    machineId: state.fleetMachineId,
+    sellerId,
+    success
+  });
+}
+
+async function runFleetSellerScan(sellerId, options) {
+  state.fleetCurrentSeller = sellerId;
+  state.targetSellerId = sellerId;
+  lastFleetProgressAt = Date.now();
+  await fleetHeartbeat('scanning');
+  await fleetLog('info', 'scan_start', `Tarama başlıyor: ${sellerId}`);
+
+  const outcome = await scrapeSellerInventory(sellerId, null, options);
+  const success = outcome !== 'error';
+  await fleetCompleteSeller(sellerId, success);
+  await fleetLog(success ? 'info' : 'error', success ? 'scan_done' : 'scan_error',
+    `${sellerId} — ${outcome}`);
+  state.fleetCurrentSeller = null;
+  return outcome;
+}
+
+async function fleetWatchdogTick() {
+  if (!state.fleetMode || !isRunning) return;
+  const staleMs = (SCRAPER_API?.fleet?.watchdogMin || 15) * 60 * 1000;
+  if (Date.now() - lastFleetProgressAt < staleMs) return;
+
+  const sellerId = state.fleetCurrentSeller || state.targetSellerId;
+  await fleetLog('warn', 'watchdog', `15dk ilerleme yok — ${sellerId} yeniden başlatılıyor`);
+  state.apiMessage = `${sellerId}: watchdog — sekmeler kapatılıp devam ediliyor...`;
+  updatePopup(true);
+
+  await closeAllFleetCategoryTabs();
+  await finishScanRun().catch(() => {});
+  lastFleetProgressAt = Date.now();
+
+  if (!sellerId || !state.fleetMode) return;
+
+  const saved = await getSettings();
+  await runFleetSellerScan(sellerId, {
+    skipCached: true,
+    inventoryMode: 'category',
+    autoUpload: saved.autoUpload,
+    apiUrl: saved.apiUrl,
+    resumeCategoryScan: true,
+    parallelTabs: saved.parallelTabs,
+    branchPruning: saved.branchPruning
+  });
+}
+
+async function startFleetLoop() {
+  if (fleetLoopRunning) return;
+  fleetLoopRunning = true;
+  const saved = await getSettings();
+
+  while (state.fleetMode) {
+    if (isRunning) {
+      await delay(5000);
+      continue;
+    }
+    let claim;
+    try {
+      claim = await fleetClaimSeller();
+    } catch (err) {
+      state.apiMessage = 'Fleet claim hatası: ' + err.message;
+      await fleetLog('error', 'claim_error', err.message);
+      updatePopup(true);
+      await delay(15000);
+      continue;
+    }
+
+    if (!claim?.sellerId) {
+      state.apiMessage = 'Fleet: kuyruk boş — 5 dk sonra tekrar';
+      await fleetHeartbeat('idle');
+      updatePopup(true);
+      await delay(5 * 60 * 1000);
+      continue;
+    }
+
+    state.fleetQueueIndex = claim.queueIndex;
+    state.apiMessage = `Fleet #${claim.queueIndex}: ${claim.sellerName} (${claim.sellerId})`;
+    updatePopup(true);
+
+    const outcome = await runFleetSellerScan(claim.sellerId, {
+      skipCached: true,
+      inventoryMode: 'category',
+      autoUpload: saved.autoUpload,
+      apiUrl: saved.apiUrl,
+      resumeCategoryScan: true,
+      parallelTabs: saved.parallelTabs,
+      branchPruning: saved.branchPruning
+    });
+
+    if (outcome === 'error') {
+      await delay(10000);
+    }
+  }
+  fleetLoopRunning = false;
+}
+
+async function startFleetOperations(msg = {}) {
+  const saved = await getSettings();
+  const machineId = String(msg.fleetMachineId || saved.fleetMachineId || '').trim();
+  if (!machineId) throw new Error('Makine ID gerekli (örn. vm-01)');
+
+  await saveSettings({
+    fleetMode: true,
+    fleetMachineId: machineId,
+    fleetMachineLabel: msg.fleetMachineLabel || saved.fleetMachineLabel || machineId,
+    apiUrl: msg.apiUrl || saved.apiUrl,
+    parallelTabs: msg.parallelTabs ?? saved.parallelTabs,
+    autoUpload: msg.autoUpload ?? saved.autoUpload
+  });
+
+  state.fleetMode = true;
+  state.fleetMachineId = machineId;
+  state.fleetMachineLabel = msg.fleetMachineLabel || saved.fleetMachineLabel || machineId;
+  lastFleetProgressAt = Date.now();
+  scheduleFleetAlarms();
+  scheduleScanKeepalive();
+
+  await fleetLog('info', 'fleet_start', 'Fleet modu başlatıldı');
+  await fleetHeartbeat('idle');
+  state.apiMessage = `Fleet ${machineId} — kuyruktan satıcı alınıyor...`;
+  updatePopup(true);
+
+  startFleetLoop().catch(err => handleScrapeError(err, 'Fleet loop'));
+}
+
+async function tryResumeFleetMode() {
+  const saved = await getSettings();
+  if (!saved.fleetMode || !saved.fleetMachineId) return;
+  state.fleetMode = true;
+  state.fleetMachineId = saved.fleetMachineId;
+  state.fleetMachineLabel = saved.fleetMachineLabel || saved.fleetMachineId;
+  scheduleFleetAlarms();
+  await fleetLog('info', 'fleet_resume', 'Service worker — fleet devam');
+  if (!isRunning && !fleetLoopRunning) {
+    startFleetLoop().catch(err => console.warn('Fleet resume:', err.message));
+  }
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === FLEET_HEARTBEAT_ALARM) {
+    if (state.fleetMode) {
+      fleetHeartbeat(isRunning ? 'scanning' : 'idle').catch(() => {});
+    }
+    return;
+  }
+  if (alarm.name === FLEET_WATCHDOG_ALARM) {
+    fleetWatchdogTick().catch(err => console.warn('Watchdog:', err.message));
+    return;
+  }
   if (alarm.name !== KEEPALIVE_ALARM) return;
   if (isRunning) {
     persistScanSession({}).catch(() => {});
@@ -1676,4 +2003,5 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onStartup.addListener(() => {
   tryResumeScanSession().catch(() => {});
+  tryResumeFleetMode().catch(() => {});
 });

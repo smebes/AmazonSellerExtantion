@@ -9,5 +9,9 @@ const SCRAPER_API = {
   },
   get sellersUrl() {
     return `${this.base}/sellers`;
+  },
+  fleet: {
+    heartbeatMin: 2,
+    watchdogMin: 15
   }
 };
