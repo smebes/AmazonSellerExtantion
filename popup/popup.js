@@ -253,7 +253,9 @@ document.getElementById('apiBtn').addEventListener('click', () => {
 
 chrome.storage.local.get('scraperState', ({ scraperState: s }) => {
   if (s) renderState(s);
-  else chrome.runtime.sendMessage({ type: 'GET_STATE' }, (full) => { if (full) renderState(full); });
+  chrome.runtime.sendMessage({ type: 'GET_STATE' }, (live) => {
+    if (!chrome.runtime.lastError && live) renderState(live);
+  });
 });
 
 chrome.storage.onChanged.addListener((changes) => {
@@ -297,6 +299,23 @@ function renderState(state) {
   };
 
   let statusText = statusMap[state.status] || state.status;
+
+  if (state.fleetMode) {
+    if (state.status === 'scraping_stores' || state.categoryProgress) {
+      statusText = state.fleetQueueIndex
+        ? `Fleet #${state.fleetQueueIndex} taraması`
+        : 'Fleet taraması';
+    } else {
+      statusText = 'Fleet aktif — kuyruk';
+    }
+    if (state.fleetMachineId) {
+      statusText = `${state.fleetMachineId}: ${statusText}`;
+    }
+  } else if (state.status === 'idle' && state.apiMessage?.includes('zaten taranmış')) {
+    statusText = 'Atlandı (daha önce taranmış)';
+  } else if (state.status === 'idle' && state.apiMessage?.includes('tüm leaf kategoriler tamam')) {
+    statusText = 'Tamamlandı ✓';
+  }
   const done = state.queueCompleted?.length || 0;
   const left = state.queuePending?.length || 0;
 

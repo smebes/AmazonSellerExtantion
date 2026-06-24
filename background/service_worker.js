@@ -9,7 +9,7 @@ const SCAN_SESSION_KEY = 'activeScanSession';
 const KEEPALIVE_ALARM = 'scanKeepalive';
 const FLEET_HEARTBEAT_ALARM = 'fleetHeartbeat';
 const FLEET_WATCHDOG_ALARM = 'fleetWatchdog';
-const EXTENSION_VERSION = '1.2.9';
+const EXTENSION_VERSION = '1.3.0';
 const DEFAULT_API_URL = SCRAPER_API.sellersUrl;
 const DEFAULT_PARALLEL_TABS = 5;
 const BRANCH_COLLAPSE_MAX = 300;
@@ -107,7 +107,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'GET_STATE') {
-    sendResponse(state);
+    tryResumeFleetMode()
+      .catch(() => {})
+      .finally(() => sendResponse(buildPopupSnapshot()));
     return true;
   }
   if (msg.type === 'GET_SELLER_PRODUCTS') {
@@ -432,7 +434,11 @@ function buildPopupSnapshot() {
     inventoryMode: state.inventoryMode,
     categoryProgress: state.categoryProgress,
     targetSellerId: state.targetSellerId,
-    apiMessage: state.apiMessage
+    apiMessage: state.apiMessage,
+    fleetMode: state.fleetMode,
+    fleetMachineId: state.fleetMachineId,
+    fleetCurrentSeller: state.fleetCurrentSeller,
+    fleetQueueIndex: state.fleetQueueIndex
   };
 }
 
@@ -541,6 +547,10 @@ function stopScanKeepalive() {
 
 async function finishScanRun() {
   isRunning = false;
+  if (state.fleetMode) {
+    scheduleScanKeepalive();
+    return;
+  }
   stopScanKeepalive();
   await clearScanSession();
 }
@@ -1823,9 +1833,16 @@ function stopFleetAlarms() {
 }
 
 async function stopFleetOperations() {
+  const saved = await getSettings();
   state.fleetMode = false;
   fleetLoopRunning = false;
   stopFleetAlarms();
+  await saveSettings({
+    fleetMode: false,
+    fleetMachineId: saved.fleetMachineId,
+    fleetMachineLabel: saved.fleetMachineLabel
+  });
+  stopScanKeepalive();
   await finishScanRun().catch(() => {});
   await closeAllFleetCategoryTabs();
   await fleetLog('info', 'fleet_stop', 'Fleet durduruldu');
@@ -1848,27 +1865,44 @@ async function fleetCompleteSeller(sellerId, success) {
 }
 
 async function runFleetSellerScan(sellerId, options) {
+  isRunning = true;
+  state.status = 'scraping_stores';
+  state.runMode = 'fleet';
   state.fleetCurrentSeller = sellerId;
   state.targetSellerId = sellerId;
   lastFleetProgressAt = Date.now();
+  scheduleScanKeepalive();
   await fleetHeartbeat('scanning');
   await fleetLog('info', 'scan_start', `Tarama başlıyor: ${sellerId}`);
+  updatePopup(true);
 
-  const outcome = await scrapeSellerInventory(sellerId, null, options);
+  let outcome;
+  try {
+    outcome = await scrapeSellerInventory(sellerId, null, options);
+  } finally {
+    state.fleetCurrentSeller = null;
+    state.categoryProgress = null;
+    await finishScanRun();
+    if (state.fleetMode) {
+      state.status = 'idle';
+      updatePopup(true);
+    }
+  }
+
   const success = outcome !== 'error';
   await fleetCompleteSeller(sellerId, success);
   await fleetLog(success ? 'info' : 'error', success ? 'scan_done' : 'scan_error',
     `${sellerId} — ${outcome}`);
-  state.fleetCurrentSeller = null;
   return outcome;
 }
 
 async function fleetWatchdogTick() {
-  if (!state.fleetMode || !isRunning) return;
+  if (!state.fleetMode) return;
+  const sellerId = state.fleetCurrentSeller || state.targetSellerId;
+  if (!sellerId) return;
   const staleMs = (SCRAPER_API?.fleet?.watchdogMin || 15) * 60 * 1000;
   if (Date.now() - lastFleetProgressAt < staleMs) return;
 
-  const sellerId = state.fleetCurrentSeller || state.targetSellerId;
   await fleetLog('warn', 'watchdog', `15dk ilerleme yok — ${sellerId} yeniden başlatılıyor`);
   state.apiMessage = `${sellerId}: watchdog — sekmeler kapatılıp devam ediliyor...`;
   updatePopup(true);
@@ -1897,6 +1931,7 @@ async function startFleetLoop() {
   const saved = await getSettings();
 
   while (state.fleetMode) {
+    scheduleScanKeepalive();
     if (isRunning) {
       await delay(5000);
       continue;
@@ -1965,6 +2000,7 @@ async function startFleetOperations(msg = {}) {
 
   await fleetLog('info', 'fleet_start', 'Fleet modu başlatıldı');
   await fleetHeartbeat('idle');
+  state.status = 'idle';
   state.apiMessage = `Fleet ${machineId} — kuyruktan satıcı alınıyor...`;
   updatePopup(true);
 
@@ -1978,17 +2014,20 @@ async function tryResumeFleetMode() {
   state.fleetMachineId = saved.fleetMachineId;
   state.fleetMachineLabel = saved.fleetMachineLabel || saved.fleetMachineId;
   scheduleFleetAlarms();
-  await fleetLog('info', 'fleet_resume', 'Service worker — fleet devam');
-  if (!isRunning && !fleetLoopRunning) {
+  scheduleScanKeepalive();
+  if (!fleetLoopRunning) {
+    await fleetLog('info', 'fleet_resume', 'Service worker — fleet devam');
     startFleetLoop().catch(err => console.warn('Fleet resume:', err.message));
   }
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLEET_HEARTBEAT_ALARM) {
-    if (state.fleetMode) {
+    getSettings().then(async saved => {
+      if (!saved.fleetMode && !state.fleetMode) return;
+      await tryResumeFleetMode().catch(() => {});
       fleetHeartbeat(isRunning ? 'scanning' : 'idle').catch(() => {});
-    }
+    });
     return;
   }
   if (alarm.name === FLEET_WATCHDOG_ALARM) {
@@ -1996,18 +2035,26 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name !== KEEPALIVE_ALARM) return;
-  if (isRunning) {
-    persistScanSession({}).catch(() => {});
-    scheduleScanKeepalive();
-    return;
-  }
-  getSettings().then(saved => {
-    if (saved.fleetMode || state.fleetMode) return;
+  getSettings().then(async saved => {
+    if (saved.fleetMode || state.fleetMode) {
+      scheduleScanKeepalive();
+      if (!fleetLoopRunning) {
+        await tryResumeFleetMode().catch(() => {});
+      }
+      return;
+    }
+    if (isRunning) {
+      persistScanSession({}).catch(() => {});
+      scheduleScanKeepalive();
+      return;
+    }
     tryResumeScanSession().catch(err => console.warn('Scan resume:', err.message));
   });
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  tryResumeScanSession().catch(() => {});
   tryResumeFleetMode().catch(() => {});
+  tryResumeScanSession().catch(() => {});
 });
+
+tryResumeFleetMode().catch(() => {});
