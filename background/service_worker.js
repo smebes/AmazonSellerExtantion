@@ -547,6 +547,8 @@ async function finishScanRun() {
 
 async function tryResumeScanSession() {
   if (isRunning) return;
+  const saved = await getSettings();
+  if (state.fleetMode || saved.fleetMode) return;
   const data = await chrome.storage.local.get(SCAN_SESSION_KEY);
   const session = data[SCAN_SESSION_KEY];
   if (!session?.queue?.length) return;
@@ -1911,7 +1913,7 @@ async function startFleetLoop() {
     }
 
     if (!claim?.sellerId) {
-      state.apiMessage = 'Fleet: kuyruk boş — 5 dk sonra tekrar';
+      state.apiMessage = 'Fleet: kuyruk boş — sunucuda POST /fleet/queue/sync gerekli';
       await fleetHeartbeat('idle');
       updatePopup(true);
       await delay(5 * 60 * 1000);
@@ -1957,6 +1959,7 @@ async function startFleetOperations(msg = {}) {
   state.fleetMachineId = machineId;
   state.fleetMachineLabel = msg.fleetMachineLabel || saved.fleetMachineLabel || machineId;
   lastFleetProgressAt = Date.now();
+  await clearScanSession();
   scheduleFleetAlarms();
   scheduleScanKeepalive();
 
@@ -1998,7 +2001,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     scheduleScanKeepalive();
     return;
   }
-  tryResumeScanSession().catch(err => console.warn('Scan resume:', err.message));
+  getSettings().then(saved => {
+    if (saved.fleetMode || state.fleetMode) return;
+    tryResumeScanSession().catch(err => console.warn('Scan resume:', err.message));
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
