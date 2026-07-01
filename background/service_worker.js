@@ -9,7 +9,7 @@ const SCAN_SESSION_KEY = 'activeScanSession';
 const KEEPALIVE_ALARM = 'scanKeepalive';
 const FLEET_HEARTBEAT_ALARM = 'fleetHeartbeat';
 const FLEET_WATCHDOG_ALARM = 'fleetWatchdog';
-const EXTENSION_VERSION = '1.3.0';
+const EXTENSION_VERSION = '1.4.0';
 const DEFAULT_API_URL = SCRAPER_API.sellersUrl;
 const DEFAULT_PARALLEL_TABS = 5;
 const BRANCH_COLLAPSE_MAX = 300;
@@ -1798,11 +1798,11 @@ async function fleetLog(level, event, message, meta) {
 }
 
 async function fleetHeartbeat(status, opts = {}) {
-  if (!state.fleetMachineId) return;
+  if (!state.fleetMachineId) return null;
   const saved = await getSettings();
   const cp = state.categoryProgress;
   try {
-    await fleetPost('/fleet/heartbeat', {
+    const data = await fleetPost('/fleet/heartbeat', {
       machineId: state.fleetMachineId,
       label: state.fleetMachineLabel || state.fleetMachineId,
       status: status || (isRunning ? 'scanning' : 'idle'),
@@ -1813,10 +1813,131 @@ async function fleetHeartbeat(status, opts = {}) {
       parallelTabs: saved.parallelTabs,
       extensionVersion: EXTENSION_VERSION,
       popupMessage: state.apiMessage?.slice(0, 500),
-      progressAt: opts.progress ? new Date(lastFleetProgressAt || Date.now()).toISOString() : undefined
+      progressAt: opts.progress ? new Date(lastFleetProgressAt || Date.now()).toISOString() : undefined,
+      meta: {
+        isRunning,
+        fleetLoopRunning,
+        activeTabs: activeCategoryTabIds.length,
+        runMode: state.runMode
+      }
     });
+    if (data?.commands?.length) {
+      executeFleetCommands(data.commands).catch(err =>
+        console.warn('Fleet commands:', err.message)
+      );
+    }
+    return data;
   } catch (err) {
     console.warn('fleetHeartbeat:', err.message);
+    return null;
+  }
+}
+
+async function fleetAckCommand(commandId, success, result) {
+  try {
+    await fleetPost(`/fleet/commands/${commandId}/ack`, {
+      machineId: state.fleetMachineId,
+      success,
+      result
+    });
+  } catch (err) {
+    console.warn('fleetAck:', err.message);
+  }
+}
+
+async function fleetReleaseCurrentSeller(reason) {
+  const sellerId = state.fleetCurrentSeller || state.targetSellerId;
+  if (!sellerId) return { released: false };
+  try {
+    const data = await fleetPost('/fleet/release', {
+      machineId: state.fleetMachineId,
+      sellerId,
+      reason: reason || 'extension_release'
+    });
+    return data;
+  } catch (err) {
+    console.warn('fleetRelease:', err.message);
+    return { released: false, error: err.message };
+  }
+}
+
+async function fleetRestartCurrentSeller(reason) {
+  const sellerId = state.fleetCurrentSeller || state.targetSellerId;
+  if (!sellerId || !state.fleetMode) return;
+
+  await fleetLog('warn', 'remote_restart', reason || 'Uzaktan yeniden başlatma');
+  state.apiMessage = `${sellerId}: uzaktan yeniden başlatılıyor...`;
+  updatePopup(true);
+
+  await closeAllFleetCategoryTabs();
+  await finishScanRun().catch(() => {});
+  lastFleetProgressAt = Date.now();
+
+  const saved = await getSettings();
+  await runFleetSellerScan(sellerId, {
+    skipCached: true,
+    inventoryMode: 'category',
+    autoUpload: saved.autoUpload,
+    apiUrl: saved.apiUrl,
+    resumeCategoryScan: true,
+    parallelTabs: saved.parallelTabs,
+    branchPruning: saved.branchPruning
+  });
+}
+
+async function executeFleetCommands(commands) {
+  for (const cmd of commands) {
+    const id = cmd.id;
+    const name = cmd.command;
+    const payload = cmd.payload || {};
+    try {
+      if (name === 'stop_fleet') {
+        await stopFleetOperations();
+        await fleetAckCommand(id, true, { action: 'stopped' });
+        continue;
+      }
+
+      if (name === 'set_parallel_tabs') {
+        const n = clampParallelTabs(payload.parallelTabs);
+        await saveSettings({ parallelTabs: n });
+        await fleetAckCommand(id, true, { parallelTabs: n });
+        continue;
+      }
+
+      if (name === 'release_seller') {
+        const sellerId = payload.sellerId || state.fleetCurrentSeller || state.targetSellerId;
+        if (sellerId && sellerId !== state.fleetCurrentSeller && sellerId !== state.targetSellerId) {
+          await fleetAckCommand(id, false, { error: 'seller_not_active' });
+          continue;
+        }
+        await fleetReleaseCurrentSeller(payload.reason || 'remote_release');
+        await closeAllFleetCategoryTabs();
+        await finishScanRun().catch(() => {});
+        state.fleetCurrentSeller = null;
+        state.targetSellerId = null;
+        state.fleetQueueIndex = null;
+        state.categoryProgress = null;
+        lastFleetProgressAt = Date.now();
+        state.apiMessage = 'Satıcı ataması serbest bırakıldı — sonraki kuyruk';
+        updatePopup(true);
+        await fleetAckCommand(id, true, { sellerId });
+        continue;
+      }
+
+      if (name === 'restart_seller') {
+        if (!state.fleetCurrentSeller && !state.targetSellerId) {
+          await fleetAckCommand(id, false, { error: 'no_active_seller' });
+          continue;
+        }
+        await fleetRestartCurrentSeller(payload.reason || 'remote_restart');
+        await fleetAckCommand(id, true, { sellerId: state.fleetCurrentSeller || state.targetSellerId });
+        continue;
+      }
+
+      await fleetAckCommand(id, false, { error: 'unknown_command' });
+    } catch (err) {
+      await fleetAckCommand(id, false, { error: err.message });
+    }
   }
 }
 
