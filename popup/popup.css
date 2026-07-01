@@ -19,6 +19,21 @@ button { background: #ff6600; color: white; border: none; padding: 6px 14px; bor
 button:hover { background: #e55a00; }
 button:disabled { background: #aaa; cursor: not-allowed; }
 .status { color: #666; font-style: italic; margin-bottom: 10px; }
+.status.api-warn { color: #b45309; font-style: normal; }
+.fleet-diag {
+  font-size: 11px;
+  color: #333;
+  background: #f5f7fa;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  line-height: 1.45;
+  font-style: normal;
+}
+.fleet-diag .warn { color: #b45309; }
+.fleet-diag .err { color: #b91c1c; }
+.fleet-diag code { font-size: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
 th { background: #f0f0f0; padding: 4px 8px; text-align: left; border-bottom: 2px solid #ccc; }
 td { padding: 4px 8px; border-bottom: 1px solid #eee; }

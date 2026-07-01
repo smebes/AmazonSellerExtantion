@@ -285,6 +285,29 @@ function productCount(state, sellerId) {
     ?? 0;
 }
 
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderFleetDiag(diag) {
+  const el = document.getElementById('fleet-diag');
+  if (!diag?.fleetMode) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const qs = diag.queueStats;
+  const qsLine = qs
+    ? `Kuyruk: <b>${qs.pending}</b> bekliyor · ${qs.scanning} taranıyor · ${qs.done} bitti · ${qs.failed} hata`
+    : (diag.liveError ? `<span class="err">API: ${escapeHtml(diag.liveError)}</span>` : 'Kuyruk yükleniyor…');
+  const runLine = diag.isRunning
+    ? `Aktif tarama: <code>${escapeHtml(diag.fleetCurrentSeller || '—')}</code> · ${diag.activeTabs} sekme`
+    : `Beklemede · loop ${diag.fleetLoopRunning ? 'açık' : 'kapalı'}`;
+  const srv = diag.machine?.popup_message;
+  const srvClass = qs?.pending === 0 && !diag.isRunning ? 'warn' : '';
+  el.innerHTML = `<strong>Fleet teşhis</strong> v${escapeHtml(diag.extensionVersion || '?')}<br>${qsLine}<br>${runLine}<br>Mod: <code>${escapeHtml(diag.runMode || '—')}</code>${srv ? `<br><span class="${srvClass}">Sunucu: ${escapeHtml(srv)}</span>` : ''}`;
+}
+
 function renderState(state) {
   const statusMap = {
     idle: 'Bekliyor',
@@ -300,17 +323,21 @@ function renderState(state) {
 
   let statusText = statusMap[state.status] || state.status;
 
-  if (state.fleetMode) {
+  if (state.fleetMode && state.runMode === 'fleet') {
     if (state.status === 'scraping_stores' || state.categoryProgress) {
       statusText = state.fleetQueueIndex
         ? `Fleet #${state.fleetQueueIndex} taraması`
         : 'Fleet taraması';
     } else {
-      statusText = 'Fleet aktif — kuyruk';
+      statusText = 'Fleet aktif — kuyruk bekleniyor';
     }
     if (state.fleetMachineId) {
       statusText = `${state.fleetMachineId}: ${statusText}`;
     }
+  } else if (state.runMode === 'seller_rescan' && state.status === 'scraping_stores') {
+    statusText = 'DB satıcı taraması (Fleet değil)';
+  } else if (state.fleetMode && state.fleetMachineId) {
+    statusText = `${state.fleetMachineId}: ${statusText}`;
   } else if (state.status === 'idle' && state.apiMessage?.includes('zaten taranmış')) {
     statusText = 'Atlandı (daha önce taranmış)';
   } else if (state.status === 'idle' && state.apiMessage?.includes('tüm leaf kategoriler tamam')) {
@@ -344,11 +371,21 @@ function renderState(state) {
 
   if (state.status === 'done' || state.status === 'idle') {
     document.getElementById('startBtn').disabled = false;
-    document.getElementById('scanSellersBtn').disabled = false;
-    document.getElementById('scanOneSellerBtn').disabled = false;
+    document.getElementById('scanSellersBtn').disabled = !!state.fleetMode;
+    document.getElementById('scanOneSellerBtn').disabled = !!state.fleetMode;
   }
 
   document.getElementById('api-status').textContent = state.apiMessage || '';
+  document.getElementById('api-status').className =
+    'status' + (state.apiMessage?.includes('hata') || state.apiMessage?.includes('boş') ? ' api-warn' : '');
+
+  if (state.fleetMode) {
+    chrome.runtime.sendMessage({ type: 'GET_FLEET_DIAG' }, (diag) => {
+      if (!chrome.runtime.lastError && diag) renderFleetDiag(diag);
+    });
+  } else {
+    document.getElementById('fleet-diag').hidden = true;
+  }
 
   if (state.queuePending || state.queueCompleted) {
     updateQueueProgress({

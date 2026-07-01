@@ -9,7 +9,8 @@ const SCAN_SESSION_KEY = 'activeScanSession';
 const KEEPALIVE_ALARM = 'scanKeepalive';
 const FLEET_HEARTBEAT_ALARM = 'fleetHeartbeat';
 const FLEET_WATCHDOG_ALARM = 'fleetWatchdog';
-const EXTENSION_VERSION = '1.4.0';
+const FLEET_SESSION_KEY = 'fleetSessionPersist';
+const EXTENSION_VERSION = '1.4.1';
 const DEFAULT_API_URL = SCRAPER_API.sellersUrl;
 const DEFAULT_PARALLEL_TABS = 5;
 const BRANCH_COLLAPSE_MAX = 300;
@@ -62,6 +63,8 @@ let state = {
 };
 
 let lastFleetProgressAt = 0;
+let lastFleetResumeLogAt = 0;
+let fleetEmptyStreak = 0;
 let activeCategoryTabIds = [];
 let fleetLoopRunning = false;
 
@@ -104,6 +107,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'CLEAR_QUEUE') {
     savePersistedQueue({ pending: [], completed: [] }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.type === 'GET_FLEET_DIAG') {
+    getFleetDiag()
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
     return true;
   }
   if (msg.type === 'GET_STATE') {
@@ -438,7 +447,10 @@ function buildPopupSnapshot() {
     fleetMode: state.fleetMode,
     fleetMachineId: state.fleetMachineId,
     fleetCurrentSeller: state.fleetCurrentSeller,
-    fleetQueueIndex: state.fleetQueueIndex
+    fleetQueueIndex: state.fleetQueueIndex,
+    fleetLoopRunning,
+    isRunning,
+    lastFleetProgressAt: lastFleetProgressAt || null
   };
 }
 
@@ -1462,6 +1474,12 @@ async function startSellerRescan(options = {}) {
   if (isRunning) return;
 
   const saved = await getSettings();
+  if (saved.fleetMode || state.fleetMode) {
+    state.apiMessage = 'Fleet modu aktif — önce Fleet → Durdur, sonra DB taraması başlatın';
+    updatePopup(true);
+    return;
+  }
+
   const apiUrl = (options.apiUrl || saved.apiUrl || DEFAULT_API_URL).trim();
   const apiBase = apiBaseFromUrl(apiUrl);
   const singleMode = Array.isArray(options.sellerIds) && options.sellerIds.length > 0;
@@ -1801,11 +1819,13 @@ async function fleetHeartbeat(status, opts = {}) {
   if (!state.fleetMachineId) return null;
   const saved = await getSettings();
   const cp = state.categoryProgress;
+  const hbStatus = status || (isRunning ? 'scanning' : 'idle');
+  const sendProgress = !!(opts.progress || isRunning || hbStatus === 'scanning');
   try {
     const data = await fleetPost('/fleet/heartbeat', {
       machineId: state.fleetMachineId,
       label: state.fleetMachineLabel || state.fleetMachineId,
-      status: status || (isRunning ? 'scanning' : 'idle'),
+      status: hbStatus,
       sellerId: state.fleetCurrentSeller || state.targetSellerId,
       queueIndex: state.fleetQueueIndex,
       jobsDone: cp?.done ?? state.fleetJobsDone ?? 0,
@@ -1813,12 +1833,15 @@ async function fleetHeartbeat(status, opts = {}) {
       parallelTabs: saved.parallelTabs,
       extensionVersion: EXTENSION_VERSION,
       popupMessage: state.apiMessage?.slice(0, 500),
-      progressAt: opts.progress ? new Date(lastFleetProgressAt || Date.now()).toISOString() : undefined,
+      progressAt: sendProgress
+        ? new Date(lastFleetProgressAt || Date.now()).toISOString()
+        : undefined,
       meta: {
         isRunning,
         fleetLoopRunning,
         activeTabs: activeCategoryTabIds.length,
-        runMode: state.runMode
+        runMode: state.runMode,
+        fleetEmptyStreak
       }
     });
     if (data?.commands?.length) {
@@ -1859,6 +1882,45 @@ async function fleetReleaseCurrentSeller(reason) {
     console.warn('fleetRelease:', err.message);
     return { released: false, error: err.message };
   }
+}
+
+async function persistFleetSession(partial) {
+  const data = await chrome.storage.local.get(FLEET_SESSION_KEY);
+  const prev = data[FLEET_SESSION_KEY] || {};
+  await chrome.storage.local.set({
+    [FLEET_SESSION_KEY]: { ...prev, ...partial, updatedAt: Date.now() }
+  });
+}
+
+async function clearFleetSession() {
+  await chrome.storage.local.remove(FLEET_SESSION_KEY);
+}
+
+async function getFleetDiag() {
+  const saved = await getSettings();
+  const base = apiBaseFromUrl(saved.apiUrl);
+  let live = null;
+  try {
+    live = await fetchJson(`${base}/fleet/live`, {}, 15000);
+  } catch (err) {
+    live = { error: err.message };
+  }
+  const machine = live?.machines?.find(m => m.machine_id === state.fleetMachineId);
+  return {
+    extensionVersion: EXTENSION_VERSION,
+    fleetMode: state.fleetMode,
+    fleetMachineId: state.fleetMachineId,
+    isRunning,
+    fleetLoopRunning,
+    runMode: state.runMode,
+    fleetCurrentSeller: state.fleetCurrentSeller,
+    fleetQueueIndex: state.fleetQueueIndex,
+    activeTabs: activeCategoryTabIds.length,
+    apiMessage: state.apiMessage,
+    queueStats: live?.queueStats || null,
+    machine: machine || null,
+    liveError: live?.error || null
+  };
 }
 
 async function fleetRestartCurrentSeller(reason) {
@@ -1966,6 +2028,7 @@ async function stopFleetOperations() {
   stopScanKeepalive();
   await finishScanRun().catch(() => {});
   await closeAllFleetCategoryTabs();
+  await clearFleetSession();
   await fleetLog('info', 'fleet_stop', 'Fleet durduruldu');
   await fleetHeartbeat('offline');
   state.apiMessage = 'Fleet modu durduruldu';
@@ -1993,13 +2056,19 @@ async function runFleetSellerScan(sellerId, options) {
   state.targetSellerId = sellerId;
   lastFleetProgressAt = Date.now();
   scheduleScanKeepalive();
-  await fleetHeartbeat('scanning');
+  await persistFleetSession({ sellerId, queueIndex: state.fleetQueueIndex, options });
+  await fleetHeartbeat('scanning', { progress: true });
   await fleetLog('info', 'scan_start', `Tarama başlıyor: ${sellerId}`);
   updatePopup(true);
 
   let outcome;
   try {
     outcome = await scrapeSellerInventory(sellerId, null, options);
+  } catch (err) {
+    outcome = 'error';
+    await fleetLog('error', 'scan_crash', err.message);
+    state.apiMessage = `${sellerId}: tarama hatası — ${err.message}`;
+    updatePopup(true);
   } finally {
     state.fleetCurrentSeller = null;
     state.categoryProgress = null;
@@ -2010,10 +2079,11 @@ async function runFleetSellerScan(sellerId, options) {
     }
   }
 
-  const success = outcome !== 'error';
+  await clearFleetSession();
+  const success = outcome !== 'error' && outcome !== undefined;
   await fleetCompleteSeller(sellerId, success);
   await fleetLog(success ? 'info' : 'error', success ? 'scan_done' : 'scan_error',
-    `${sellerId} — ${outcome}`);
+    `${sellerId} — ${outcome ?? 'error'}`);
   return outcome;
 }
 
@@ -2057,6 +2127,22 @@ async function startFleetLoop() {
       await delay(5000);
       continue;
     }
+
+    const sessionData = await chrome.storage.local.get(FLEET_SESSION_KEY);
+    const session = sessionData[FLEET_SESSION_KEY];
+    if (session?.sellerId && session.options) {
+      const age = Date.now() - (session.updatedAt || 0);
+      if (age < 30 * 60 * 1000) {
+        state.fleetQueueIndex = session.queueIndex ?? state.fleetQueueIndex;
+        state.apiMessage = `${session.sellerId}: yarım tarama devam ediyor...`;
+        updatePopup(true);
+        await fleetLog('info', 'scan_resume', `SW — ${session.sellerId}`);
+        await runFleetSellerScan(session.sellerId, session.options);
+        continue;
+      }
+      await clearFleetSession();
+    }
+
     let claim;
     try {
       claim = await fleetClaimSeller();
@@ -2069,12 +2155,19 @@ async function startFleetLoop() {
     }
 
     if (!claim?.sellerId) {
-      state.apiMessage = 'Fleet: kuyruk boş — sunucuda POST /fleet/queue/sync gerekli';
+      fleetEmptyStreak++;
+      const qs = 'Fleet kuyruğu boş (pending=0). Sunucuda: POST /fleet/queue/sync veya failed satıcıyı yeniden kuyruğa alın.';
+      state.apiMessage = qs;
       await fleetHeartbeat('idle');
       updatePopup(true);
+      if (fleetEmptyStreak === 1 || fleetEmptyStreak % 6 === 0) {
+        await fleetLog('warn', 'queue_empty', `Kuyruk boş (${fleetEmptyStreak}. kontrol)`);
+      }
       await delay(5 * 60 * 1000);
       continue;
     }
+
+    fleetEmptyStreak = 0;
 
     state.fleetQueueIndex = claim.queueIndex;
     state.apiMessage = `Fleet #${claim.queueIndex}: ${claim.sellerName} (${claim.sellerId})`;
@@ -2136,8 +2229,13 @@ async function tryResumeFleetMode() {
   state.fleetMachineLabel = saved.fleetMachineLabel || saved.fleetMachineId;
   scheduleFleetAlarms();
   scheduleScanKeepalive();
+
   if (!fleetLoopRunning) {
-    await fleetLog('info', 'fleet_resume', 'Service worker — fleet devam');
+    const now = Date.now();
+    if (now - lastFleetResumeLogAt > 10 * 60 * 1000) {
+      lastFleetResumeLogAt = now;
+      await fleetLog('info', 'fleet_resume', 'Service worker — fleet devam');
+    }
     startFleetLoop().catch(err => console.warn('Fleet resume:', err.message));
   }
 }
